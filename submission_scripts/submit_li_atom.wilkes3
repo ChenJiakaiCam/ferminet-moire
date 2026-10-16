@@ -1,0 +1,115 @@
+#!/bin/bash
+#!
+#! Example SLURM job script for Wilkes3 (AMD EPYC 7763, ConnectX-6, A100)
+#!
+
+#!#############################################################
+#!#### Modify the options in this section as appropriate ######
+#!#############################################################
+
+#! sbatch directives begin here ###############################
+#! Name of the job:
+#SBATCH -J fn_li
+#! Which project should be charged (NB Wilkes2 projects end in '-GPU'):
+#SBATCH -A SCHEMM-SL3-GPU
+#! How many whole nodes should be allocated?
+#SBATCH --nodes=1
+#! How many (MPI) tasks will there be in total?
+#SBATCH --ntasks=1
+#! Specify the number of CPUs per task
+#SBATCH --cpus-per-task=128
+#! Specify the number of GPUs per node
+#SBATCH --gres=gpu:4
+#! How much wallclock time will be required?
+#SBATCH --time=00:30:00
+#! What types of email messages do you wish to receive?
+#SBATCH --mail-type=ALL
+#! Uncomment this to prevent the job from being requeued
+##SBATCH --no-requeue
+
+#! Do not change:
+#SBATCH -p ampere
+
+#! sbatch directives end here (put any additional directives above this line)
+
+numnodes=$SLURM_JOB_NUM_NODES
+numtasks=$SLURM_NTASKS
+mpi_tasks_per_node=$(echo "$SLURM_TASKS_PER_NODE" | sed -e  's/^\([0-9][0-9]*\).*$/\1/')
+#! Work directory (i.e. where the job will run):
+workdir="$SLURM_SUBMIT_DIR"  # The value of SLURM_SUBMIT_DIR sets workdir to the directory
+                             # in which sbatch is run.
+
+#!#############################################################
+
+. /etc/profile.d/modules.sh
+
+module purge
+# For GPU
+module load rhel8/default-amp
+module load gcc/11
+module load cuda/12.1
+# module load cudnn/8.9_cuda-11.8
+
+# Activate Python virtual environment
+source /rds/user/jc2405/hpc-work/ferminet/venv/bin/activate
+
+# ==============================================================================
+# Load all NVIDIA CUDA libraries installed by pip
+# ==============================================================================
+
+export VENV_LIB="$VIRTUAL_ENV/lib/python3.11/site-packages"
+
+for libdir in "$VENV_LIB"/nvidia/*/lib; do
+    export LD_LIBRARY_PATH="$libdir:$LD_LIBRARY_PATH"
+done
+# ==============================================================================
+
+
+# export OMP_NUM_THREADS=1
+export OMP_NUM_THREADS=32
+
+export JAX_LOG_COMPILES=0
+
+#Takes long time to even compile/start training, so we try to use persistent cache to speed up compilation once it's compiled once
+export JAX_COMPILATION_CACHE_DIR="/rds/user/jc2405/hpc-work/ferminet/jax_cache/li_test"
+export JAX_PERSISTENT_CACHE_MIN_ENTRY_SIZE_BYTES=-1
+
+np=$[${numnodes}*${mpi_tasks_per_node}]
+
+CMD="ferminet --config /rds/user/jc2405/hpc-work/ferminet/ferminet/configs/atom.py --config.system.atom Li --config.batch_size 256 \
+  --config.log.save_path="/rds/user/jc2405/hpc-work/ferminet/runs/li_test/" \
+  --config.log.restore_path="/rds/user/jc2405/hpc-work/ferminet/runs/li_test/" \
+  --config.pretrain.iterations=100 \
+  --config.optim.iterations=10000 \
+  --config.log.save_frequency=0.5 \
+  --config.optim.optimizer 'none' \
+  --config.observables.density
+  "
+
+###############################################################
+### You should not have to change anything below this line ####
+###############################################################
+
+cd $workdir
+echo -e "Changed directory to `pwd`.\n"
+
+JOBID=$SLURM_JOB_ID
+
+echo -e "JobID: $JOBID\n======"
+echo "Time: `date`"
+echo "Running on master node: `hostname`"
+echo "Current directory: `pwd`"
+
+if [ "$SLURM_JOB_NODELIST" ]; then
+        #! Create a machine file:
+        export NODEFILE=`generate_pbs_nodefile`
+        cat $NODEFILE | uniq > machine.file.$JOBID
+        echo -e "\nNodes allocated:\n================"
+        echo `cat machine.file.$JOBID | sed -e 's/\..*$//g'`
+fi
+
+echo -e "\nnumtasks=$numtasks, numnodes=$numnodes, mpi_tasks_per_node=$mpi_tasks_per_node (OMP_NUM_THREADS=$OMP_NUM_THREADS)"
+
+echo -e "\nExecuting command:\n==================\n$CMD\n"
+
+eval $CMD

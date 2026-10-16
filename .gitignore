@@ -2,3 +2,21 @@
 *.egg-info
 *.csv
 *.npz
+
+# Environments and generated Python files
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+jax_cache/
+
+# Simulation output directories
+/runs/
+/ferminet_2026*/
+/gpu_test_*/
+
+# Scheduler output
+machine.file.*
+slurm-*.out
+slurm_*.out
