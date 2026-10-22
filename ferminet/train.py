@@ -63,8 +63,10 @@ def init_electrons(  # pylint: disable=dangerous-default-value
     init_width: float,
     core_electrons: Mapping[str, int] = {},
     max_iter: int = 10_000,
+    ndim: int = 3,
+    lattice: Optional[jnp.ndarray] = None,
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
-  """Initializes electron positions around each atom.
+  """Initializes electron positions around each atom or uniformly in a PBC cell.
 
   Args:
     key: JAX RNG state.
@@ -79,6 +81,10 @@ def init_electrons(  # pylint: disable=dangerous-default-value
     max_iter: maximum number of iterations to try to find a valid initial
         electron configuration for each atom. If reached, all electrons are
         initialised from a Gaussian distribution centred on the origin.
+    ndim: dimensionality of the space.
+    lattice: optional (ndim, ndim) periodic cell matrix (columns are cell
+      vectors). If provided, walkers are initialized uniformly in fractional
+      cell coordinates.
 
   Returns:
     array of (batch_size, (nalpha+nbeta)*ndim) of initial (random) electron
@@ -87,6 +93,22 @@ def init_electrons(  # pylint: disable=dangerous-default-value
     of spin configurations, where 1 and -1 indicate alpha and beta electrons
     respectively.
   """
+  if lattice is not None:
+    lat = jnp.asarray(lattice)
+    cell_ndim = lat.shape[0]
+    nelectrons = sum(electrons)
+    key, subkey = jax.random.split(key)
+    fractional = jax.random.uniform(
+        subkey, shape=(batch_size, nelectrons, cell_ndim)
+    )
+    electron_positions = jnp.reshape(
+        fractional @ lat.T, (batch_size, nelectrons * cell_ndim)
+    )
+    electron_spins = _assign_spin_configuration(
+        electrons[0], electrons[1], batch_size
+    )
+    return electron_positions, electron_spins
+
   niter = 0
   total_electrons = sum(atom.charge - core_electrons.get(atom.symbol, 0)
                         for atom in molecule)
@@ -130,7 +152,7 @@ def init_electrons(  # pylint: disable=dangerous-default-value
         ' implementing a custom initialisation.',
         niter,
     )
-    electron_positions = jnp.zeros(shape=(3*sum(electrons),))
+    electron_positions = jnp.zeros(shape=(ndim * sum(electrons),))
 
   # Create a batch of configurations with a Gaussian distribution about each
   # atom.
@@ -602,6 +624,12 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
       checkpoint.find_last_checkpoint(ckpt_save_path) or
       checkpoint.find_last_checkpoint(ckpt_restore_path))
 
+  pbc_lattice = cfg.system.get('pbc_lattice', None)
+  if pbc_lattice is None:
+    pbc_lattice = cfg.mcmc.get('lattice', None)
+  if pbc_lattice is None and 'lattice' in cfg.system.make_local_energy_kwargs:
+    pbc_lattice = cfg.system.make_local_energy_kwargs['lattice']
+
   if ckpt_restore_filename:
     (t_init,
      data,
@@ -623,6 +651,8 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
         batch_size=total_host_batch_size,
         init_width=cfg.mcmc.init_width,
         core_electrons=core_electrons,
+        ndim=cfg.system.ndim,
+        lattice=pbc_lattice,
     )
     # For excited states, each device has a batch of walkers, where each walker
     # is nstates * nelectrons. The vmap over nstates is handled in the function
@@ -740,6 +770,7 @@ def train(cfg: ml_collections.ConfigDict, writer_manager=None):
       atoms=atoms_to_mcmc,
       blocks=cfg.mcmc.blocks * num_states,
       ndim=cfg.system.ndim,
+      lattice=pbc_lattice,
   )
 
   # Construct loss and optimizer

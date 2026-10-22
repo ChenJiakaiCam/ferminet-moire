@@ -64,6 +64,19 @@ def _log_prob_gaussian(x, mu, sigma):
   return numer - denom
 
 
+def _wrap_positions(x, lattice, ndim):
+  """Wraps particle positions into the primary periodic cell if lattice is set."""
+  if lattice is None:
+    return x
+  lat = jnp.asarray(lattice, dtype=x.dtype)
+  inv_lat = jnp.linalg.inv(lat)
+  orig_shape = x.shape
+  coords = jnp.reshape(x, (-1, ndim))
+  fractional = (coords @ inv_lat.T) % 1.0
+  wrapped = fractional @ lat.T
+  return jnp.reshape(wrapped, orig_shape)
+
+
 def mh_accept(x1, x2, lp_1, lp_2, ratio, key, num_accepts):
   """Given state, proposal, and probabilities, execute MH accept/reject step."""
   key, subkey = jax.random.split(key)
@@ -87,6 +100,7 @@ def mh_update(
     ndim=3,
     blocks=1,
     i=0,
+    lattice=None,
 ):
   """Performs one Metropolis-Hastings step using an all-electron move.
 
@@ -107,6 +121,8 @@ def mh_update(
     ndim: dimensionality of system.
     blocks: Ignored.
     i: Ignored.
+    lattice: Optional (ndim, ndim) matrix whose columns are periodic cell
+      vectors. When provided, proposed positions are wrapped into the cell.
 
   Returns:
     (x, key, lp, num_accepts), where:
@@ -120,6 +136,7 @@ def mh_update(
   x1 = data.positions
   if atoms is None:  # symmetric proposal, same stddev everywhere
     x2 = x1 + stddev * jax.random.normal(subkey, shape=x1.shape)  # proposal
+    x2 = _wrap_positions(x2, lattice, ndim)
     lp_2 = 2.0 * f(
         params, x2, data.spins, data.atoms, data.charges
     )  # log prob of proposal
@@ -159,6 +176,7 @@ def mh_block_update(
     ndim=3,
     blocks=1,
     i=0,
+    lattice=None,
 ):
   """Performs one Metropolis-Hastings step for a block of electrons.
 
@@ -175,6 +193,8 @@ def mh_block_update(
     ndim: dimensionality of system.
     blocks: number of blocks to split electron updates into.
     i: index of block of electrons to move.
+    lattice: Optional (ndim, ndim) matrix whose columns are periodic cell
+      vectors. When provided, proposed positions are wrapped into the cell.
 
   Returns:
     (x, key, lp, num_accepts), where:
@@ -201,6 +221,7 @@ def mh_block_update(
     x2 = jnp.reshape(x2, [batch_size, -1])
     if pad > 0:
       x2 = x2[..., :-pad*ndim]
+    x2 = _wrap_positions(x2, lattice, ndim)
     # log prob of proposal
     lp_2 = 2.0 * f(params, x2, data.spins, data.atoms, data.charges)
     ratio = lp_2 - lp_1
@@ -222,7 +243,8 @@ def make_mcmc_step(batch_network,
                    steps=10,
                    atoms=None,
                    ndim=3,
-                   blocks=1):
+                   blocks=1,
+                   lattice=None):
   """Creates the MCMC step function.
 
   Args:
@@ -238,6 +260,8 @@ def make_mcmc_step(batch_network,
     ndim: Dimensionality of the system (usually 3).
     blocks: Number of blocks to split the updates into. If 1, use all-electron
       moves.
+    lattice: Optional (ndim, ndim) matrix whose columns are periodic cell
+      vectors. When provided, proposed positions are wrapped into the cell.
 
   Returns:
     Callable which performs the set of MCMC steps.
@@ -268,7 +292,8 @@ def make_mcmc_step(batch_network,
           atoms=atoms,
           ndim=ndim,
           blocks=blocks,
-          i=i)
+          i=i,
+          lattice=lattice)
 
     nsteps = steps * blocks
     logprob = 2.0 * batch_network(
